@@ -273,11 +273,65 @@ WHERE f.departamento_id = (
 
 -- 3.11 Filtros com funções agregadas (HAVING)
 
+-- Departamentos com mais de 2 funcionarios
+SELECT d.nome, COUNT(f.id) AS total_funcionarios
+FROM departamentos d
+LEFT JOIN funcionarios f ON d.id = f.departamento_id
+GROUP BY d.id, d.nome
+HAVING total_funcionarios > 2;
+
+-- Departamentos com salário médio acima de 7000
+SELECT d.nome, AVG(f.salario) AS media_salarial
+FROM departamentos d
+JOIN funcionarios f ON d.id = f.departamento_id
+GROUP BY d.id, d.nome
+HAVING media_salarial > 6500;
 
 
 
 
+-- 4. Exclusão de Dados (DELETE)
 
+-- 4.1. DELETE com filtro (recomendado)
+
+-- Excluir um funcioário específico
+DELETE FROM funcionarios WHERE id = 1;
+
+-- Excluir funcionarios com salário abaixo de 3000;
+SELECT * FROM funcionarios WHERE salario < 3000;
+DELETE FROM funcionarios WHERE salario < 3000;
+
+-- Excluir funcionarios inativos
+SELECT * FROM funcionarios WHERE departamento_id IS NULL;
+DELETE FROM funcionarios WHERE ativo = FALSE;
+
+
+
+
+-- 4.2. DELETE com múltiplas condições
+
+-- Excluir funcionários de um departamento específico contratados antes de 2023
+DELETE FROM funcionarios
+WHERE departamento_id = 1 AND data_contratacao < '2023-01-01';
+
+SELECT * FROM funcionarios
+WHERE departamento_id = 1 AND data_contratacao < '2023-01-01';
+
+
+
+
+-- 4.3. DELETE com subconsulta
+
+-- Excluir funcionarios de departamentos com orçamento abaixo de 50000
+DELETE FROM funcionarios
+WHERE departamento_id IN (
+	SELECT id FROM departamentos WHERE orcamento < 4500;
+);
+-- 
+SELECT * FROM funcionarios
+WHERE departamento_id IN (
+	SELECT id FROM departamentos WHERE orcamento < 150000
+);
 
 
 
