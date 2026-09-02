@@ -426,13 +426,59 @@ ser executados para recriar o banco. É protátil entre versões e sistemas oper
 
 -- 5.1. mysqldump (ferramenta padrão)
 
-O mysqldump é a ferramenta nativa do MySQL para backups lógicos. Produz um
+-- O mysqldump é a ferramenta nativa do MySQL para backups lógicos. Produz um
 arquivo com instruções CREATE TABLE e INSERT que recriam o banco.
+
+
 
 Backup completo de todos os bancos
 
+bash
 mysqldump -u root -p --all-databases --single-transaction --master-data=2 > 
 	/backup/full_backup_$(date +%Y%m%d).sql
+
+
+	
+Backup apenas da estrutura (sem dados)
+
+bash
+mysqldump -u root -p --no-data empresa > /backup/estrutura_empresa.sql
+
+
+
+Backup apenas dos dados (sem estrutura)
+
+bash
+mysqldump -u root -p --no-create-info empresa > dados_empresa.sql
+
+
+
+Backup com compressão em tempo real
+
+bash
+mysqldump -u root -p --single-transaction empresa | gzip > empresa_$(date +%Y%m%d).sql.gz
+
+
+
+Backup com opções para consistência em replicação
+
+bash
+mysqldump -u root -p \
+	--all-databases \
+	--single-transaction \
+	--triggers \
+	--routines \
+	--events \
+	--master-data=2 \
+	--flush-logs \
+	> full_backup_$(data +%Y%m%d_%H%M).sql
+
+	
+	
+Restaurando um backup mysqldump
+	
+	
+
 
 
 					
