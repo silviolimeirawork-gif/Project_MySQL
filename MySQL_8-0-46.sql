@@ -335,3 +335,104 @@ WHERE departamento_id IN (
 
 
 
+
+-- 4.4. DELETE com LIMIT (para evitar bloqueios longos)
+
+-- Excluir em lotes de 100 registros
+DELETE FROM funcionarios WHERE ativo = FALSE LIMIT 100;
+SELECT * FROM funcionarios WHERE ativo = TRUE LIMIT 2;
+
+
+
+
+-- 4.5. DELETE com JOIN (MySQL suporta exclusão em múltiplas tabelas)
+
+-- Excluir funcionários e seus registros relacionados em outra tabela
+DELETE f, fb
+FROM funcionarios f
+JOIN funcionarios_backup fb ON f.id = fb.id
+WHERE f.ativo = FALSE;
+--
+SELECT * 
+FROM funcionarios f
+JOIN funcionarios_backup fb ON f.id = fb.id
+WHERE f.ativo = TRUE;
+
+
+
+
+-- 4.6. TRUNCATE (exclusão rápida de todos os dados)
+
+-- Remove TODOS os registros e reseta o AUTO_INCREMENT
+TRUNCATE TABLE funcionarios_backup;
+
+-- Diferença: DELETE sem WHERE remove todos, mas mantém o AUTO_INCREMENT
+DELETE FROM funcionarios_backup;
+
+
+
+
+-- 4.7. DELETE com segurança (usando transações)
+
+-- Iniciar transação
+START TRANSACTION;
+
+-- Verificar quais registros serão afetados
+SELECT * FROM funcionarios WHERE salario < 3000;
+
+-- Executar o DELETE
+DELETE FROM funcionarios WHERE salario < 3000;
+
+-- Verificar o resultado
+SELECT ROW_COUNT() AS registros_afetados;
+
+-- Se estiver tudo certo, confirma
+COMMIT;
+
+-- Se algo deu errado, desfaz
+-- ROLLBACK;
+
+-- ⚠️ Cuidados essenciais com DELETE
+
+Cuidado				Explicação					Exemplo
+
+Sempre use WHERE	DELETE sem WHERE remove		x DELETE FROM funcionarios;
+					TODOS os registros
+
+Teste com SELECT 	Veja o que será excluído	✅
+					antes de deletar			SELECT * FROM funcionarios
+												WHERE ...
+
+Use transações		Permite desfazer em caso	START TRANSACTION; ...
+					de erro						COMMIT;
+
+Considere FOREIGN KEY
+					Pode falhar se houver		Verifique dependências
+					registros filhos			antes
+					
+DELETE é logado		Cada exclusão é registrada	Use LIMIT para grandes
+					no binlog (impacto em		volumes
+					performance)
+
+					
+					
+					
+-- 5. Backup Lógico (Logical Backup)
+
+Backup lógico consiste em exportar dados e estrutura como comandos SQL que podem
+ser executados para recriar o banco. É protátil entre versões e sistemas operacionais.
+
+
+
+-- 5.1. mysqldump (ferramenta padrão)
+
+O mysqldump é a ferramenta nativa do MySQL para backups lógicos. Produz um
+arquivo com instruções CREATE TABLE e INSERT que recriam o banco.
+
+Backup completo de todos os bancos
+
+mysqldump -u root -p --all-databases --single-transaction --master-data=2 > 
+	/backup/full_backup_$(date +%Y%m%d).sql
+
+
+					
