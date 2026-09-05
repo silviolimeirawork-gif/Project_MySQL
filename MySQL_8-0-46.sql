@@ -512,21 +512,24 @@ em tempo real
 bash
 $ ./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.dumpInstance('/backup/instance_dump')"
 
-# Backup de um schema espedifico
+# Restaurar de uma instancia inteira
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.loadDump('/backup/instance_dump', {threads: 4, resetProgress: true})"
+
+# Backup de um schema especifico
 ./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js \
 -e "util.dumpSchemas(['empresa'], '/backup/empresa_dump')"
 
-# Restaurar
+# Restaurar de um schema especifico
 ./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js \
 -e "util.dumpSchemas(['empresa'], '/backup/empresa_dump')"
 
-# Com compressão e paralelismo
+# Com compressão e paralelismo de um schema especifico
 ./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.dumpSchemas(['empresa'], '/backup/empresa_dump', {threads: 4, compression: 'gzip'})"
 
-# Restaurar
+# Restaurar de um schema especifico
 ./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.loadDump('/backup/empresa_dump', {threads: 4})"
 
-
+CREATE DATABASE empresa;
 
 
 -- 5.4. Backup de tabelas em formato CSV
@@ -544,4 +547,194 @@ mysql -u root -p -e "CREATE TABLE IF NOT EXISTS empresa.funcionarios1 (nome VARC
 
 
 
-					
+-- 6. Backup Físico (Physical Backup)
+
+Backup físico copia os arquivos do banco de dados no sistema de arquivos. É mais
+rápido para restauração, especialmente em bancos grandes, e preserva índices e
+estruturas internas
+
+-- 6.1. MySQL Enterprise Backup (MEB) - Solução Comercial
+
+O MySQL Enterprise Backup é a solução oficial da Oracle para backup físico
+Suporta backup hot (com o banco em execução) e é obrigatório para tabelas com
+tablespace criptografado.
+
+Backup completo (single-file)
+bash
+mysqlbackup --user=root --password=senha \
+  --backup-image=/backup/full_backup.mbi \
+  --backup-dir=/backup \
+  --show-progress \
+  backup-to-image
+
+Backup completo para diretório
+bash
+mysqlbackup --user=root --password=senha \
+  --backup-dir=/backup/$(date +%Y%m%d) \
+  --with-timestamp \
+  backup
+
+Backup com compressão
+bash
+mysqlbackup --user=root --password=senha \
+  --backup-image=/backup/full_backup_compressed.mbi \
+  --compress \
+  backup-to-image
+  
+Backup incremental
+bash
+# Baseado no último backup completo
+mysqlbackup --user=root --password=senha \
+  --backup-dir=/backup/incremental_$(date +%Y%m%d) \
+  --incremental \
+  --incremental-base=dir:/backup/full_20260101 \
+  backup
+  
+Restaurar
+bash
+# Parar o MySQL primeiro
+mysqlbackup --backup-image=/backup/full_backup.mbi \
+  --backup-dir=/backup/restore \
+  image-to-backup-dir
+  
+# Depois copiar os arquivos para o datadir
+
+  
+  
+  
+-- 6.2 Percona XtraBackup - Solução Open Source
+
+O Percona XtraBackup (PXB) é uma ferramenta gratuita e open source que faz backup
+físico hot (sem bloquear o banco).
+
+⚠️ Importante: O PXB 8.0 só funciona com o MySQL 8.0 devido a mundanças no redo log
+e data dictionary.
+
+Instalação
+bash
+# Ubuntu/Debian_
+# Corrige quebras
+sudo apt --fix-broken install
+
+# Remove pacote problemático (se existir)
+sudo dpkg --remove percona-xtrabackup-80 2>/dev/null
+sudo apt autoremove -y
+
+# Instala via repositório (recomendado)
+wget https://repo.percona.com/apt/percona-release_latest.generic_all.deb
+sudo dpkg -i percona-release_latest.generic_all.deb
+sudo percona-release enable-only tools release
+sudo apt update
+sudo apt install percona-xtrabackup-80 -y
+
+# Verifica
+xtrabackup --version
+
+
+
+
+Criar usuário para backup
+sql
+CREATE USER 'xtrabackup'@'localhost' IDENTIFIED BY 'XtraPass123!';
+GRANT RELOAD, PROCESS, LOCK TABLES, REPLICATION CLIENT, SELECT ON *.* TO 'xtrabackup'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+
+
+
+
+Backup completo
+sql
+SHOW VARIABLES LIKE 'datadir';
+
+GRANT BACKUP_ADMIN ON *.* TO 'xtrabackup'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+
+SHOW VARIABLES LIKE 'socket';
+/usr/local/mysql/data/
+
+
+🛠️ Passo 1 – Criar o diretório pai com permissões
+
+bash
+sudo mkdir -p /backup/mysql
+sudo chown -R $(whoami):$(whoami) /backup
+
+Isso cria a estrutura e garante que o usuário atual tenha permissão de 
+escrita (o sudo xtrabackup executará como root, então ele terá acesso).
+
+
+🧪 Passo 2 – Verificar espaço em disco
+
+bash
+df -h /backup
+Certifique-se de que há espaço livre suficiente (o backup pode ser grande, 
+dependendo do tamanho dos dados).
+
+
+
+
+Para fazer backup incremental com o Percona XtraBackup, você precisa de:
+
+Um backup completo (base).
+
+Um primeiro incremental – baseado no completo.
+
+Um segundo incremental – baseado no primeiro incremental (e não no base).
+
+Todos os comandos usam --backup e o parâmetro --incremental-basedir para 
+indicar o diretório do backup anterior.
+
+📦 Estrutura de diretórios sugerida
+text
+/backup/mysql/
+├── base_20260905/          # backup completo
+├── inc1_20260905/          # primeiro incremental (baseado no base)
+└── inc2_20260905/          # segundo incremental (baseado no inc1)
+
+# Refazer base - backup completo
+sudo rm -rf /backup/mysql/base_$(date +%Y%m%d)
+sudo xtrabackup --backup --user=xtrabackup --password='XtraPass123!' \
+--datadir=/usr/local/mysql/data --target-dir=/backup/mysql/base_$(date +%Y%m%d)
+
+# Primeiro incremental
+sudo xtrabackup --backup --user=xtrabackup --password='XtraPass123!' \
+--datadir=/usr/local/mysql/data --target-dir=/backup/mysql/inc1_$(date +%Y%m%d) \
+--incremental-basedir=/backup/mysql/base_$(date +%Y%m%d)
+
+# Segundo incremental
+sudo xtrabackup --backup --user=xtrabackup --password='XtraPass123!' \
+--datadir=/usr/local/mysql/data --target-dir=/backup/mysql/inc2_$(date +%Y%m%d) \
+--incremental-basedir=/backup/mysql/inc1_$(date +%Y%m%d)
+
+# Preparar base + incrementais
+sudo xtrabackup --prepare --apply-log-only --target-dir=/backup/mysql/base_$(date +%Y%m%d)
+sudo xtrabackup --prepare --apply-log-only --target-dir=/backup/mysql/base_$(date +%Y%m%d) \
+--incremental-dir=/backup/mysql/inc1_$(date +%Y%m%d)
+sudo xtrabackup --prepare --target-dir=/backup/mysql/base_$(date +%Y%m%d) \
+--incremental-dir=/backup/mysql/inc2_$(date +%Y%m%d)
+
+
+
+
+📌 Resumo dos comandos para restaurar
+
+bash
+sudo systemctl stop mysql
+sudo mv /usr/local/mysql/data /usr/local/mysql/data_backup  # opcional
+sudo xtrabackup --copy-back --target-dir=/backup/mysql/base_$(date +%Y%m%d)
+sudo chown -R mysql:mysql /usr/local/mysql/data
+sudo systemctl start mysql
+
+Se você não preparou o base com os incrementais, faça isso antes da 
+restauração. Se tiver dúvidas sobre qual é o estado atual do base, 
+execute o comando de preparação final novamente (sem --apply-log-only) 
+para garantir a consistência:
+
+bash
+sudo xtrabackup --prepare --target-dir=/backup/mysql/base_20260905
+
+Isso finalizará a preparação e deixará o backup pronto para restauração.
+
+

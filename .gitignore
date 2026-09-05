@@ -1,5 +1,7 @@
 *.deb*
 *.gz.*
+!percona-release_latest.generic_all.deb
+!percona-xtrabackup-80_8.0.32-26-1.jammy_amd64.deb
 mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/
 ##############################
 ## Java
