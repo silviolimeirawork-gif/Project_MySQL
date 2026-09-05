@@ -738,3 +738,39 @@ sudo xtrabackup --prepare --target-dir=/backup/mysql/base_20260905
 Isso finalizará a preparação e deixará o backup pronto para restauração.
 
 
+
+
+-- 6.3. Backup físico manual (cold backup)
+
+Se você pode parar o MySQL, um backup físico manual é simples:
+
+sql (mostra a localizacao dos dados no MySQL)
+SHOW VARIABLES LIKE 'datadir';
+
+bash
+# Parar o MySQL
+sudo systemctl stop mysql
+
+# Copiar todo o diretório de dados seguindo o link simbólico (-L)
+sudo cp -rL /usr/local/mysql /backup/mysql_$(date +%Y%m%d)
+
+# Ou com tar e diretório de dados seguindo o link simbólico (-h)
+sudo tar -czhf /backup/mysql_$(date +%Y%m%d).tar.gz /usr/local/mysql
+
+# Iniciar o MySQL novamente
+sudo systemctl start mysql
+
+Vantagem: Extremamente simples.
+Desvantagem: Requer downtime.
+
+
+
+
+
+
+
+
+
+
+
+
