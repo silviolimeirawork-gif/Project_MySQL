@@ -476,8 +476,71 @@ mysqldump -u root -p \
 	
 	
 Restaurando um backup mysqldump
-	
-	
+
+bash
+# Restaurar banco de dados
+mysql -u root -p empresa < /backup/empresa_20260101.sql
+
+# Retaurar com compressão
+gunzip -c /backup/empresa_20260101.sql.gz | mysql -u root -p emrpesa
+
+# Restaurar todos os bancos
+mysql -u root -p < /backup/full_backup_20260101.sql
+
+
+
+
+-- 5.2. mysqlpump (paralelização - deprecated)
+
+O mysqlpump foi introduzido para oferecer backup paralelo, mas é deprecated desde o
+MySQL 8.0.34 e será removido em versões futuras. A Oracle recomenda usar
+mysqlsump ou o MySQL Shell
+
+bash
+# Exemplo de mysqlpump (não recomendado para uso futuro)
+mysqlpump -u root -p --databases empresa --single-transaction > /backup/empresa.sql
+
+
+
+
+-- 5.3 MySQL Shell Dump Utilities (recomendado)
+
+O MySQL Shell oferece utilitarios modernos com paralelismo, compressão e progresso
+em tempo real
+
+# Backup de uma instância inteira
+bash
+$ ./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.dumpInstance('/backup/instance_dump')"
+
+# Backup de um schema espedifico
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js \
+-e "util.dumpSchemas(['empresa'], '/backup/empresa_dump')"
+
+# Restaurar
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js \
+-e "util.dumpSchemas(['empresa'], '/backup/empresa_dump')"
+
+# Com compressão e paralelismo
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.dumpSchemas(['empresa'], '/backup/empresa_dump', {threads: 4, compression: 'gzip'})"
+
+# Restaurar
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.loadDump('/backup/empresa_dump', {threads: 4})"
+
+
+
+
+-- 5.4. Backup de tabelas em formato CSV
+
+-- Exportar para CSV
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.exportTable('empresa.funcionarios', '/tmp/funcionarios.csv', {fieldsTerminatedBy: ',', fieldsEnclosedBy: '\"', linesTerminatedBy: '\\n'})"
+
+-- Importar de CSV
+# 1. Cria a tabela manualmente
+mysql -u root -p -e "CREATE TABLE IF NOT EXISTS empresa.funcionarios1 (nome VARCHAR(100), cargo VARCHAR(100), salario DECIMAL(10,2));"
+
+# 2. Importa o CSV
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.importTable('/tmp/funcionarios.csv', {schema: 'empresa', table: 'funcionarios1', fieldsTerminatedBy: ',', fieldsEnclosedBy: '\"', linesTerminatedBy: '\\n'})"	
+
 
 
 

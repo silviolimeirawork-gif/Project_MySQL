@@ -1,0 +1,129 @@
+A configuração local_infile é uma variável de sistema do MySQL que controla 
+se o servidor permite ou não o carregamento de arquivos a partir do computador 
+do cliente (e não do próprio servidor).
+
+
+
+
+🎯 O que ela faz exatamente?
+
+Quando ativada (ON), ela permite o uso do comando LOAD DATA LOCAL INFILE. 
+Este comando é utilizado para importar dados de um arquivo de texto 
+(como um CSV) que está na máquina do cliente para uma tabela no banco de 
+dados. É uma forma muito eficiente de carregar grandes volumes de dados.
+
+
+
+
+⚠️ Por que ela é desativada por padrão?
+
+Por uma questão de segurança. O risco principal é que um servidor MySQL 
+malicioso (ou comprometido) pode solicitar ao cliente o envio de qualquer 
+arquivo para o qual o cliente tenha permissão de leitura. Isso poderia 
+permitir o acesso a dados sensíveis, como:
+
+Arquivos de configuração do sistema.
+Chaves SSH ou outros segredos.
+Qualquer outro arquivo acessível pelo usuário que executa o cliente MySQL.
+
+
+
+
+🔧 Por que precisei ativá-la para restaurar seu backup?
+
+A ferramenta util.loadDump do MySQL Shell utiliza internamente o comando 
+LOAD DATA LOCAL INFILE para importar os dados do backup de forma eficiente. 
+Portanto, para que a restauração funcione, o servidor precisa ter essa 
+funcionalidade habilitada.
+
+
+
+
+⚙️ Como ativar e desativar?
+
+Ativar (Temporário): SET GLOBAL local_infile = ON;.
+
+Ativar (Permanente): Adicione local-infile=1 no arquivo de configuração do 
+MySQL (ex: /etc/mysql/mysql.conf.d/mysqld.cnf) e reinicie o serviço.
+
+Desativar: SET GLOBAL local_infile = OFF;.
+
+
+
+
+💡 Recomendação
+
+É uma prática recomendada ativar o local_infile apenas quando for estritamente 
+necessário (como durante sua restauração) e desativá-lo logo em seguida para 
+evitar riscos de segurança desnecessários.
+
+Localizando o arquivo de configuração do MySQL:
+bash
+$ mysql --help | grep -A1 "Default options"
+
+Comando para fazer o backup:
+bash
+$ ./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.dumpInstance('/backup/instance_dump')"
+
+Comando para restaurar o banco (Versão completa):
+bash
+$ ./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.loadDump('/backup/instance_dump')"
+
+
+
+
+🔍 Resumo dos Comandos
+
+Objetivo	Comando
+
+Restauração completa	
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.loadDump('/backup/instance_dump')"
+
+Restauração com 8 threads	
+... -e "util.loadDump('/backup/instance_dump', {threads: 8})"
+
+Restaurar apenas um banco	... 
+-e "util.loadDump('/backup/instance_dump', {schema: 'meu_banco'})"
+
+Ignorar versão do servidor	
+... -e "util.loadDump('/backup/instance_dump', {ignoreVersion: true})"
+
+Estes comandos devem funcionar com a versão do MySQL Shell 
+que você baixou (8.0.35). Lembre-se de que o backup e a restauração 
+são feitos com os utilitários do MySQL Shell e são compatíveis entre si.
+
+
+
+
+✅ Verificar a Restauração
+Após a execução, você pode se conectar ao MySQL e verificar se os dados 
+foram restaurados:
+
+bash
+$ mysql -u root -p -e "SHOW DATABASES;"
+
+
+
+
+
+
+
+
+
+# Redefinir senha
+sudo systemctl stop mysql
+sudo mysqld_safe --skip-grant-tables &
+sudo mysql -u root -e "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY 'SenhaForte!';"
+sudo pkill mysqld_safe
+sudo systemctl start mysql
+
+# Testar
+mysql -u root -p -e "SELECT 1"
+
+# Ativar local_infile
+mysql -u root -p -e "SET GLOBAL local_infile = ON;"
+
+# Restaurar
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.loadDump('/backup/instance_dump', {local_infile: true})"
+
+
