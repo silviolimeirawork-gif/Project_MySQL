@@ -1,0 +1,338 @@
+🚀 Script completo com envio para nuvem e rotação de chaves
+Salve como backup_mysql_cloud.sh:
+
+bash
+#!/bin/bash
+# ==============================================================
+# Script de Backup MySQL com Criptografia Assimétrica (RSA)
+# + Envio para Nuvem (rclone) + Rotação de Chaves
+# ==============================================================
+# Uso:
+#   ./backup_mysql_cloud.sh --backup       # Backup + envio para nuvem
+#   ./backup_mysql_cloud.sh --restore      # Restaura o último backup da nuvem
+#   ./backup_mysql_cloud.sh --list         # Lista backups disponíveis na nuvem
+#   ./backup_mysql_cloud.sh --rotate-keys  # Força rotação de chaves
+#   ./backup_mysql_cloud.sh --help
+# ==============================================================
+
+# =========== CONFIGURAÇÕES ===========
+BACKUP_DIR="/backup"
+KEY_DIR="$HOME/.mysql_backup_keys"
+PUBLIC_KEY="$KEY_DIR/backup.pub"
+PRIVATE_KEY="$KEY_DIR/backup.pem"
+KEY_VAULT="$KEY_DIR/key_vault"  # Diretório para chaves antigas
+DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="$BACKUP_DIR/backup_$DATE.sql.gz.enc"
+SYMMETRIC_KEY_FILE="$BACKUP_DIR/backup_$DATE.key.enc"
+MYSQL_USER="root"
+MYSQL_HOST="localhost"
+
+# ===== ROTATION CONFIG =====
+ROTATION_DAYS=30  # Gerar novo par de chaves a cada 30 dias
+KEY_AGE_FILE="$KEY_DIR/key_generation_date"
+
+# ===== CLOUD CONFIG (rclone) =====
+# Configure o rclone com: rclone config (crie um remote chamado 'backup')
+RCLONE_REMOTE="backup:/mysql_backups"  # Ex: "gdrive:/backups/mysql" ou "s3://bucket/pasta"
+# =============================
+
+mkdir -p "$BACKUP_DIR" "$KEY_DIR" "$KEY_VAULT"
+
+# =========== FUNÇÕES ===========
+
+# Gerar par de chaves RSA (com data)
+generate_keys() {
+    local KEY_SUFFIX="$1"  # opcional: sufixo para chaves antigas
+    local PRIV="$KEY_DIR/backup${KEY_SUFFIX}.pem"
+    local PUB="$KEY_DIR/backup${KEY_SUFFIX}.pub"
+
+    echo "🔑 Gerando par de chaves RSA 4096 bits..."
+    openssl genrsa -out "$PRIV" 4096
+    if [ $? -ne 0 ]; then return 1; fi
+    openssl rsa -in "$PRIV" -pubout -out "$PUB"
+    if [ $? -ne 0 ]; then return 1; fi
+    chmod 600 "$PRIV"
+    chmod 644 "$PUB"
+    echo "$(date +%s)" > "$KEY_AGE_FILE"
+    echo "✅ Chaves geradas: $PRIV e $PUB"
+}
+
+# Rotação de chaves (se necessário)
+rotate_keys_if_needed() {
+    if [ ! -f "$PRIVATE_KEY" ] || [ ! -f "$PUBLIC_KEY" ]; then
+        echo "⚠️  Chaves não encontradas. Gerando novas..."
+        generate_keys
+        return
+    fi
+
+    if [ ! -f "$KEY_AGE_FILE" ]; then
+        echo "⚠️  Arquivo de idade das chaves não encontrado. Forçando rotação."
+        generate_keys
+        return
+    fi
+
+    LAST_GEN=$(cat "$KEY_AGE_FILE")
+    NOW=$(date +%s)
+    AGE_DAYS=$(( (NOW - LAST_GEN) / 86400 ))
+
+    if [ "$AGE_DAYS" -ge "$ROTATION_DAYS" ]; then
+        echo "🔄 Chaves com $AGE_DAYS dias de uso. Rotacionando..."
+        # Mover chaves atuais para o vault com timestamp
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        mv "$PRIVATE_KEY" "$KEY_VAULT/backup_${TIMESTAMP}.pem"
+        mv "$PUBLIC_KEY" "$KEY_VAULT/backup_${TIMESTAMP}.pub"
+        # Gerar novas
+        generate_keys
+    else
+        echo "✅ Chaves atuais têm $AGE_DAYS dias (limite: $ROTATION_DAYS). Nenhuma rotação necessária."
+    fi
+}
+
+# Backup (criptografia híbrida + envio para nuvem)
+do_backup() {
+    # Verificar/rotacionar chaves
+    rotate_keys_if_needed
+
+    if [ ! -f "$PUBLIC_KEY" ]; then
+        echo "❌ Chave pública não encontrada. Execute --rotate-keys ou --backup novamente."
+        exit 1
+    fi
+
+    echo "🔄 Iniciando backup do MySQL..."
+    echo "   Arquivo local: $BACKUP_FILE"
+
+    # Gerar chave simétrica aleatória
+    SYM_KEY=$(openssl rand -base64 32)
+
+    # Dump + compactar + criptografar com AES-256
+    mysqldump -u "$MYSQL_USER" -p -h "$MYSQL_HOST" \
+        --all-databases --single-transaction --quick --skip-lock-tables | \
+    gzip | \
+    openssl enc -aes-256-cbc -pbkdf2 -salt -out "$BACKUP_FILE" \
+        -pass "pass:$SYM_KEY"
+
+    if [ $? -ne 0 ]; then
+        echo "❌ Erro no dump ou criptografia."
+        rm -f "$BACKUP_FILE"
+        exit 1
+    fi
+
+    # Criptografar chave simétrica com chave pública RSA
+    echo "$SYM_KEY" | openssl pkeyutl -encrypt -pubin -inkey "$PUBLIC_KEY" -out "$SYMMETRIC_KEY_FILE"
+    if [ $? -ne 0 ]; then
+        echo "❌ Erro ao criptografar chave simétrica."
+        rm -f "$BACKUP_FILE"
+        exit 1
+    fi
+
+    echo "✅ Backup local criado:"
+    echo "   Dados: $BACKUP_FILE"
+    echo "   Chave: $SYMMETRIC_KEY_FILE"
+
+    # ===== ENVIO PARA NUVEM =====
+    if command -v rclone &> /dev/null; then
+        echo "☁️  Enviando para nuvem via rclone ($RCLONE_REMOTE)..."
+        rclone copy "$BACKUP_FILE" "$RCLONE_REMOTE/"
+        rclone copy "$SYMMETRIC_KEY_FILE" "$RCLONE_REMOTE/"
+        if [ $? -eq 0 ]; then
+            echo "✅ Envio para nuvem concluído."
+            # Opcional: limpar arquivos locais antigos (manter último ou todos)
+            # find "$BACKUP_DIR" -name "backup_*.sql.gz.enc" -mtime +7 -delete
+        else
+            echo "⚠️  Falha no envio para nuvem. Verifique a configuração do rclone."
+        fi
+    else
+        echo "⚠️  rclone não encontrado. Backup salvo apenas localmente."
+        echo "   Instale o rclone: sudo apt install rclone"
+    fi
+}
+
+# Restaurar (baixa da nuvem se necessário)
+do_restore() {
+    local REMOTE_BACKUP
+    local REMOTE_KEY
+    local LOCAL_BACKUP
+    local LOCAL_KEY
+
+    # Verificar se há backup local
+    LATEST_DATA_LOCAL=$(ls -t "$BACKUP_DIR"/backup_*.sql.gz.enc 2>/dev/null | head -n1)
+    LATEST_KEY_LOCAL=$(ls -t "$BACKUP_DIR"/backup_*.key.enc 2>/dev/null | head -n1)
+
+    if [ -n "$LATEST_DATA_LOCAL" ] && [ -n "$LATEST_KEY_LOCAL" ]; then
+        echo "📂 Backup local encontrado: $LATEST_DATA_LOCAL"
+        LOCAL_BACKUP="$LATEST_DATA_LOCAL"
+        LOCAL_KEY="$LATEST_KEY_LOCAL"
+    else
+        # Tentar baixar da nuvem
+        if command -v rclone &> /dev/null; then
+            echo "☁️  Nenhum backup local. Buscando na nuvem ($RCLONE_REMOTE)..."
+            # Listar arquivos remotos, pegar o mais recente (ordem alfabética funciona com timestamp)
+            REMOTE_BACKUP=$(rclone lsf "$RCLONE_REMOTE" --include "backup_*.sql.gz.enc" | sort | tail -n1)
+            REMOTE_KEY=$(rclone lsf "$RCLONE_REMOTE" --include "backup_*.key.enc" | sort | tail -n1)
+
+            if [ -z "$REMOTE_BACKUP" ] || [ -z "$REMOTE_KEY" ]; then
+                echo "❌ Nenhum backup encontrado na nuvem."
+                exit 1
+            fi
+
+            echo "   Baixando: $REMOTE_BACKUP e $REMOTE_KEY"
+            rclone copy "$RCLONE_REMOTE/$REMOTE_BACKUP" "$BACKUP_DIR/"
+            rclone copy "$RCLONE_REMOTE/$REMOTE_KEY" "$BACKUP_DIR/"
+            if [ $? -ne 0 ]; then
+                echo "❌ Falha ao baixar da nuvem."
+                exit 1
+            fi
+            LOCAL_BACKUP="$BACKUP_DIR/$REMOTE_BACKUP"
+            LOCAL_KEY="$BACKUP_DIR/$REMOTE_KEY"
+        else
+            echo "❌ rclone não instalado e nenhum backup local encontrado."
+            exit 1
+        fi
+    fi
+
+    # Restaurar
+    echo "🔄 Restaurando backup: $LOCAL_BACKUP"
+    
+    # Procurar a chave privada correspondente (pode estar no vault)
+    # Extrair timestamp do nome do backup (ex: backup_20260313_020000)
+    TIMESTAMP=$(basename "$LOCAL_BACKUP" | sed 's/backup_\(.*\)\.sql\.gz\.enc/\1/')
+    # Tentar a chave atual primeiro
+    PRIV_KEY="$PRIVATE_KEY"
+    if [ ! -f "$PRIV_KEY" ]; then
+        # Procurar no vault por chave com timestamp próximo (anterior à data do backup)
+        # (Simplificação: usar a chave mais recente do vault)
+        PRIV_KEY=$(ls -t "$KEY_VAULT"/backup_*.pem 2>/dev/null | head -n1)
+        if [ -z "$PRIV_KEY" ]; then
+            echo "❌ Nenhuma chave privada encontrada (atual ou no vault)."
+            exit 1
+        fi
+        echo "   Usando chave privada do vault: $PRIV_KEY"
+    fi
+
+    # Descriptografar chave simétrica
+    SYM_KEY=$(openssl pkeyutl -decrypt -inkey "$PRIV_KEY" -in "$LOCAL_KEY" 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$SYM_KEY" ]; then
+        echo "❌ Falha ao descriptografar chave simétrica. Chave privada incorreta ou backup corrompido."
+        exit 1
+    fi
+
+    # Descriptografar dados e importar
+    openssl enc -d -aes-256-cbc -pbkdf2 -in "$LOCAL_BACKUP" -pass "pass:$SYM_KEY" | \
+    gunzip | \
+    mysql -u "$MYSQL_USER" -p -h "$MYSQL_HOST"
+
+    if [ $? -eq 0 ]; then
+        echo "✅ Restauração concluída com sucesso!"
+    else
+        echo "❌ Erro na restauração (verifique credenciais do MySQL)."
+        exit 1
+    fi
+}
+
+# Listar backups na nuvem
+list_backups() {
+    if command -v rclone &> /dev/null; then
+        echo "☁️  Backups disponíveis em $RCLONE_REMOTE:"
+        rclone ls "$RCLONE_REMOTE" --include "backup_*.sql.gz.enc"
+    else
+        echo "❌ rclone não instalado."
+    fi
+}
+
+# Forçar rotação de chaves
+force_rotate() {
+    echo "🔄 Forçando rotação de chaves..."
+    if [ -f "$PRIVATE_KEY" ] && [ -f "$PUBLIC_KEY" ]; then
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        mv "$PRIVATE_KEY" "$KEY_VAULT/backup_${TIMESTAMP}.pem"
+        mv "$PUBLIC_KEY" "$KEY_VAULT/backup_${TIMESTAMP}.pub"
+        echo "   Chaves antigas movidas para $KEY_VAULT"
+    fi
+    generate_keys
+}
+
+# Ajuda
+show_help() {
+    cat << EOF
+Uso: $0 [OPÇÃO]
+
+Opções:
+  --backup          Faz backup (criptografia híbrida RSA) e envia para nuvem.
+                    Rotação automática de chaves conforme $ROTATION_DAYS dias.
+  --restore         Restaura o último backup (da nuvem se não estiver local).
+  --list            Lista backups disponíveis na nuvem.
+  --rotate-keys     Força rotação imediata do par de chaves.
+  --help            Mostra esta ajuda.
+
+Pré-requisitos:
+  - MySQL (com usuário root ou com privilégios para dump).
+  - rclone configurado com remote 'backup' apontando para seu bucket.
+  - Para configurar rclone: rclone config
+
+Segurança:
+  - Chave privada fica em ~/.mysql_backup_keys/ (protegida 600).
+  - Chaves antigas são arquivadas no vault (não são descartadas).
+  - A rotação periódica reduz risco de comprometimento de chave.
+EOF
+}
+
+# =========== MAIN ===========
+case "$1" in
+    --backup)       do_backup ;;
+    --restore)      do_restore ;;
+    --list)         list_backups ;;
+    --rotate-keys)  force_rotate ;;
+    --help|*)       show_help ;;
+esac
+🧰 Configuração do rclone (envio para nuvem)
+1. Instalar rclone
+bash
+sudo apt install rclone
+2. Configurar um remote (exemplo: Google Drive)
+bash
+rclone config
+Siga as instruções para criar um remote. Nomeie como backup (ou altere no script).
+
+Exemplo para Amazon S3, Google Cloud Storage, OneDrive, etc.
+
+3. Testar o envio
+bash
+rclone copy /etc/hostname backup:/teste/
+🔐 Como funciona a rotação de chaves
+O script verifica a idade das chaves (arquivo ~/.mysql_backup_keys/key_generation_date).
+
+Se ultrapassar ROTATION_DAYS (30 dias), ele:
+
+Move as chaves atuais para o vault (~/.mysql_backup_keys/key_vault/) com timestamp no nome.
+Gera um novo par de chaves.
+Para restaurar backups antigos, ele busca automaticamente a chave privada correspondente no vault (pelo timestamp do backup).
+
+📤 Exemplo de uso
+1. Primeira execução (geração de chaves)
+bash
+./backup_mysql_cloud.sh --backup
+Vai gerar as chaves, fazer backup e enviar para a nuvem.
+
+2. Agendar no cron (backup diário)
+bash
+crontab -e
+Adicione:
+
+text
+0 2 * * * /caminho/para/backup_mysql_cloud.sh --backup >> /var/log/backup_mysql.log 2>&1
+3. Restauração
+bash
+./backup_mysql_cloud.sh --restore
+Se o backup não estiver local, ele baixa da nuvem e restaura.
+
+4. Listar backups na nuvem
+bash
+./backup_mysql_cloud.sh --list
+🔒 Segurança adicional
+Criptografe as chaves antigas no vault com uma senha mestra (ex: usando gpg ou openssl enc). Isso evita que chaves antigas fiquem expostas.
+
+Mantenha o vault em um local separado (outro disco ou nuvem) com backup.
+
+Monitore o espaço em nuvem para evitar custos excessivos.
+
+

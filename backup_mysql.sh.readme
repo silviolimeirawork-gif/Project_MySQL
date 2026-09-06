@@ -1,0 +1,55 @@
+🚀 Como usar
+1. Salve o script e torne‑o executável
+bash
+nano backup_mysql.sh
+# Cole o conteúdo acima, salve (Ctrl+O, Enter) e saia (Ctrl+X)
+chmod +x backup_mysql.sh
+2. Crie o arquivo de senha (se ainda não existir)
+bash
+./backup_mysql.sh --create-pass
+Será solicitada a senha (será salva em ~/.backup_pass com permissões 600).
+
+3. Fazer backup
+bash
+./backup_mysql.sh --backup
+O script pedirá a senha do MySQL (root) e, em seguida, fará o dump, compactação e criptografia. O arquivo final estará em /backup/backup_YYYYMMDD_HHMMSS.sql.gz.enc.
+
+4. Restaurar o último backup
+bash
+./backup_mysql.sh --restore
+O script localizará automaticamente o backup mais recente, pedirá a senha do MySQL e restaurará todos os bancos de dados.
+
+📌 Explicação das opções importantes
+Opção no script	Descrição
+--single-transaction	Garante consistência para bancos InnoDB sem bloquear tabelas.
+--quick	Otimiza a exportação para tabelas grandes.
+--skip-lock-tables	Evita bloqueios de leitura (já que usamos transação).
+openssl enc -aes-256-cbc -pbkdf2 -salt	Criptografia forte com derivação de chave moderna.
+-pass "file:$PASS_FILE"	Lê a senha do arquivo, sem expô‑la no comando.
+🔒 Reforço de segurança
+O arquivo ~/.backup_pass tem permissões 600 (apenas o dono lê/escreve).
+
+A senha do MySQL nunca é armazenada – é solicitada interativamente a cada execução.
+
+O backup criptografado pode ser guardado em local seguro (ex: outro disco, nuvem).
+
+📆 Agendamento (cron)
+Para automatizar backups diários, edite o crontab:
+
+bash
+crontab -e
+Adicione (por exemplo, às 2h da manhã):
+
+text
+0 2 * * * /caminho/para/backup_mysql.sh --backup >> /var/log/backup_mysql.log 2>&1
+Nota: No ambiente cron, certifique‑se de que o arquivo ~/.backup_pass existe e está acessível (use caminhos absolutos para o script e para o arquivo de senha).
+
+🔍 Teste de restauração em ambiente isolado
+Antes de confiar totalmente, faça um teste:
+
+Crie um backup.
+
+Restaure em um banco de teste (ex: --databases teste).
+
+Compare a integridade dos dados.
+

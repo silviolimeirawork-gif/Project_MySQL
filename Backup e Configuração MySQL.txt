@@ -72,6 +72,19 @@ $ ./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhos
 
 
 
+🧹 Verifique o resultado
+
+Após o término, liste os arquivos:
+
+bash
+$ ls -la /backup/instance_dump/
+
+Você verá arquivos .sql, .tsv e @.json – isso confirma 
+que o backup foi gerado.
+
+
+
+
 🔍 Resumo dos Comandos
 
 Objetivo	Comando
@@ -105,7 +118,20 @@ $ mysql -u root -p -e "SHOW DATABASES;"
 
 
 
+MySQL Shell Dump Utilities (recomendado)
 
+cd ~/eclipse-workspace-2026/Project_MySql
+
+wget https://dev.mysql.com/get/Downloads/MySQL-Shell/mysql-shell-8.0.35-linux-glibc2.17-x86-64bit.tar.gz
+
+tar -xzf mysql-shell-8.0.35-linux-glibc2.17-x86-64bit.tar.gz
+
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --js -e "print('OK')"
+
+sudo mkdir -p /backup
+sudo chown $USER:$USER /backup
+
+./mysql-shell-8.0.35-linux-glibc2.17-x86-64bit/bin/mysqlsh --uri root@localhost:3306 --js -e "util.dumpInstance('/backup/instance_dump', {all: true})"
 
 
 

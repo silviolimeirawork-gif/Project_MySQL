@@ -1,0 +1,420 @@
+Aqui está um script completo que integra backup criptografado com envio para Amazon S3 usando AWS CLI e rotação automática de backups (mantendo apenas os X dias mais recentes).
+
+📦 Script: backup_mysql_s3.sh
+bash
+#!/bin/bash
+# ==========================================
+# Backup MySQL com Criptografia Assimétrica (RSA) + AWS S3
+# ==========================================
+# Uso:
+#   ./backup_mysql_s3.sh --backup          # Faz backup, criptografa e envia para S3
+#   ./backup_mysql_s3.sh --restore         # Restaura o último backup do S3
+#   ./backup_mysql_s3.sh --create-keys     # Gera par de chaves RSA
+#   ./backup_mysql_s3.sh --configure-aws   # Configura credenciais AWS
+#   ./backup_mysql_s3.sh --set-lifecycle   # Aplica política de expiração no S3
+#   ./backup_mysql_s3.sh --help            # Ajuda
+# ==========================================
+
+# ========== CONFIGURAÇÕES ==========
+BACKUP_DIR="/backup"
+KEY_DIR="$HOME/.mysql_backup_keys"
+PUBLIC_KEY="$KEY_DIR/backup.pub"
+PRIVATE_KEY="$KEY_DIR/backup.pem"
+DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="$BACKUP_DIR/backup_$DATE.sql.gz.enc"
+SYMMETRIC_KEY_FILE="$BACKUP_DIR/backup_$DATE.key.enc"
+MYSQL_USER="root"
+MYSQL_HOST="localhost"
+
+# Configurações AWS
+S3_BUCKET="seu-bucket-backup"           # ← ALTERE PARA SEU BUCKET
+S3_PREFIX="mysql-backups/"              # Pasta dentro do bucket
+RETENTION_DAYS=30                       # Dias para manter os backups no S3
+
+# ========== CRIAÇÃO DE DIRETÓRIOS ==========
+mkdir -p "$BACKUP_DIR" "$KEY_DIR"
+
+# ==========================================
+# Gerar par de chaves RSA (4096 bits)
+# ==========================================
+create_keys() {
+    echo "🔑 Gerando par de chaves RSA de 4096 bits..."
+    if [ -f "$PRIVATE_KEY" ] || [ -f "$PUBLIC_KEY" ]; then
+        echo "⚠️  Já existem chaves em $KEY_DIR"
+        read -p "Deseja sobrescrevê-las? (s/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Ss]$ ]]; then
+            echo "Operação cancelada."
+            return
+        fi
+        rm -f "$PRIVATE_KEY" "$PUBLIC_KEY"
+    fi
+
+    openssl genrsa -out "$PRIVATE_KEY" 4096
+    if [ $? -ne 0 ]; then
+        echo "❌ Erro ao gerar chave privada."
+        return 1
+    fi
+
+    openssl rsa -in "$PRIVATE_KEY" -pubout -out "$PUBLIC_KEY"
+    if [ $? -ne 0 ]; then
+        echo "❌ Erro ao extrair chave pública."
+        return 1
+    fi
+
+    chmod 600 "$PRIVATE_KEY"
+    chmod 644 "$PUBLIC_KEY"
+    echo "✅ Chaves geradas com sucesso!"
+    echo "   Chave privada: $PRIVATE_KEY (mantenha em segurança!)"
+    echo "   Chave pública:  $PUBLIC_KEY"
+}
+
+# ==========================================
+# Configurar credenciais AWS
+# ==========================================
+configure_aws() {
+    echo "🔧 Configurando AWS CLI..."
+    echo "Serão solicitadas suas credenciais da AWS."
+    echo "Você precisará de:"
+    echo "  - AWS Access Key ID"
+    echo "  - AWS Secret Access Key"
+    echo "  - Região (ex: us-east-1)"
+    echo "  - Formato de saída (ex: json)"
+    echo ""
+    aws configure
+    if [ $? -eq 0 ]; then
+        echo "✅ AWS CLI configurada com sucesso!"
+        echo "Testando conexão com S3..."
+        aws s3 ls "s3://$S3_BUCKET" --max-items 1 &>/dev/null
+        if [ $? -eq 0 ]; then
+            echo "✅ Conexão com o bucket $S3_BUCKET OK!"
+        else
+            echo "⚠️  Não foi possível acessar o bucket $S3_BUCKET."
+            echo "   Verifique se o bucket existe e se as permissões estão corretas."
+        fi
+    else
+        echo "❌ Falha na configuração da AWS CLI."
+        exit 1
+    fi
+}
+
+# ==========================================
+# Aplicar política de lifecycle no S3 (expiração automática)
+# ==========================================
+set_lifecycle() {
+    echo "🔄 Aplicando política de lifecycle no bucket $S3_BUCKET..."
+    echo "   Objetos com prefixo '$S3_PREFIX' serão deletados após $RETENTION_DAYS dias."
+
+    # Cria arquivo JSON temporário com a política
+    LIFECYCLE_JSON=$(mktemp)
+    cat > "$LIFECYCLE_JSON" << EOF
+{
+  "Rules": [
+    {
+      "ID": "DeleteOldBackups",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "$S3_PREFIX"
+      },
+      "Expiration": {
+        "Days": $RETENTION_DAYS
+      }
+    }
+  ]
+}
+EOF
+
+    aws s3api put-bucket-lifecycle-configuration \
+        --bucket "$S3_BUCKET" \
+        --lifecycle-configuration file://"$LIFECYCLE_JSON"
+
+    if [ $? -eq 0 ]; then
+        echo "✅ Política de lifecycle aplicada com sucesso!"
+        echo "   Backups em s3://$S3_BUCKET/$S3_PREFIX serão deletados após $RETENTION_DAYS dias."
+    else
+        echo "❌ Falha ao aplicar política de lifecycle."
+        echo "   Verifique se o bucket existe e se você tem permissão s3:PutBucketLifecycleConfiguration."
+    fi
+
+    rm -f "$LIFECYCLE_JSON"
+}
+
+# ==========================================
+# Backup com envio para S3
+# ==========================================
+do_backup() {
+    # Verifica chave pública
+    if [ ! -f "$PUBLIC_KEY" ]; then
+        echo "❌ Chave pública não encontrada em $PUBLIC_KEY"
+        echo "Execute $0 --create-keys primeiro."
+        exit 1
+    fi
+
+    # Verifica AWS CLI
+    if ! command -v aws &> /dev/null; then
+        echo "❌ AWS CLI não encontrada. Instale com: sudo apt install awscli"
+        exit 1
+    fi
+
+    echo "🔄 Iniciando backup do MySQL..."
+    echo "📁 Arquivo local: $BACKUP_FILE"
+    echo "☁️  Destino S3: s3://$S3_BUCKET/$S3_PREFIX"
+
+    # 1. Gerar chave simétrica aleatória
+    SYM_KEY=$(openssl rand -base64 32)
+
+    # 2. Dump + compactar + criptografar com AES-256
+    mysqldump -u "$MYSQL_USER" -p -h "$MYSQL_HOST" \
+        --all-databases --single-transaction --quick --skip-lock-tables | \
+    gzip | \
+    openssl enc -aes-256-cbc -pbkdf2 -salt -out "$BACKUP_FILE" \
+        -pass "pass:$SYM_KEY"
+
+    if [ $? -ne 0 ]; then
+        echo "❌ Erro no dump ou criptografia."
+        exit 1
+    fi
+
+    # 3. Criptografar a chave simétrica com RSA
+    echo "$SYM_KEY" | openssl pkeyutl -encrypt -pubin -inkey "$PUBLIC_KEY" -out "$SYMMETRIC_KEY_FILE"
+    if [ $? -ne 0 ]; then
+        echo "❌ Erro ao criptografar chave simétrica."
+        rm -f "$BACKUP_FILE"
+        exit 1
+    fi
+
+    echo "✅ Backup local concluído:"
+    echo "   Dados: $BACKUP_FILE ($(du -h "$BACKUP_FILE" | cut -f1))"
+    echo "   Chave: $SYMMETRIC_KEY_FILE"
+
+    # 4. Enviar para S3
+    echo "☁️  Enviando para S3..."
+    aws s3 cp "$BACKUP_FILE" "s3://$S3_BUCKET/$S3_PREFIX"
+    if [ $? -ne 0 ]; then
+        echo "❌ Falha no upload do arquivo de dados."
+        exit 1
+    fi
+
+    aws s3 cp "$SYMMETRIC_KEY_FILE" "s3://$S3_BUCKET/$S3_PREFIX"
+    if [ $? -ne 0 ]; then
+        echo "❌ Falha no upload do arquivo de chave."
+        exit 1
+    fi
+
+    echo "✅ Upload concluído com sucesso!"
+    echo "   s3://$S3_BUCKET/$S3_PREFIX/backup_$DATE.sql.gz.enc"
+    echo "   s3://$S3_BUCKET/$S3_PREFIX/backup_$DATE.key.enc"
+
+    # 5. Limpeza local (opcional - mantém apenas o último backup local)
+    echo "🧹 Removendo backups locais antigos (mantendo apenas os 2 mais recentes)..."
+    ls -t "$BACKUP_DIR"/backup_*.sql.gz.enc 2>/dev/null | tail -n +3 | xargs -r rm -f
+    ls -t "$BACKUP_DIR"/backup_*.key.enc 2>/dev/null | tail -n +3 | xargs -r rm -f
+}
+
+# ==========================================
+# Restaurar do S3
+# ==========================================
+do_restore() {
+    if [ ! -f "$PRIVATE_KEY" ]; then
+        echo "❌ Chave privada não encontrada em $PRIVATE_KEY"
+        exit 1
+    fi
+
+    # Buscar o backup mais recente no S3
+    echo "🔍 Buscando o backup mais recente no S3..."
+    LATEST_DATA=$(aws s3 ls "s3://$S3_BUCKET/$S3_PREFIX" --recursive | grep "\.sql\.gz\.enc" | sort -r | head -1 | awk '{print $4}')
+    LATEST_KEY=$(aws s3 ls "s3://$S3_BUCKET/$S3_PREFIX" --recursive | grep "\.key\.enc" | sort -r | head -1 | awk '{print $4}')
+
+    if [ -z "$LATEST_DATA" ] || [ -z "$LATEST_KEY" ]; then
+        echo "❌ Nenhum backup completo encontrado no S3."
+        exit 1
+    fi
+
+    echo "📥 Baixando do S3:"
+    echo "   Dados: $LATEST_DATA"
+    echo "   Chave: $LATEST_KEY"
+
+    # Baixar arquivos temporários
+    TMP_DATA=$(mktemp)
+    TMP_KEY=$(mktemp)
+
+    aws s3 cp "s3://$S3_BUCKET/$LATEST_DATA" "$TMP_DATA"
+    if [ $? -ne 0 ]; then
+        echo "❌ Falha ao baixar arquivo de dados."
+        rm -f "$TMP_DATA" "$TMP_KEY"
+        exit 1
+    fi
+
+    aws s3 cp "s3://$S3_BUCKET/$LATEST_KEY" "$TMP_KEY"
+    if [ $? -ne 0 ]; then
+        echo "❌ Falha ao baixar arquivo de chave."
+        rm -f "$TMP_DATA" "$TMP_KEY"
+        exit 1
+    fi
+
+    # Descriptografar chave simétrica
+    SYM_KEY=$(openssl pkeyutl -decrypt -inkey "$PRIVATE_KEY" -in "$TMP_KEY" 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$SYM_KEY" ]; then
+        echo "❌ Erro ao descriptografar chave simétrica."
+        rm -f "$TMP_DATA" "$TMP_KEY"
+        exit 1
+    fi
+
+    # Restaurar
+    echo "🔄 Restaurando banco de dados..."
+    openssl enc -d -aes-256-cbc -pbkdf2 -in "$TMP_DATA" -pass "pass:$SYM_KEY" | \
+    gunzip | \
+    mysql -u "$MYSQL_USER" -p -h "$MYSQL_HOST"
+
+    if [ $? -eq 0 ]; then
+        echo "✅ Restauração concluída com sucesso!"
+    else
+        echo "❌ Erro durante a restauração."
+    fi
+
+    rm -f "$TMP_DATA" "$TMP_KEY"
+}
+
+# ==========================================
+# Ajuda
+# ==========================================
+show_help() {
+    cat << EOF
+Uso: $0 [OPÇÃO]
+
+Opções:
+  --backup           Faz backup, criptografa e envia para S3.
+  --restore          Restaura o último backup do S3.
+  --create-keys      Gera par de chaves RSA (4096 bits).
+  --configure-aws    Configura credenciais da AWS CLI.
+  --set-lifecycle    Aplica política de expiração no S3 (deleta após $RETENTION_DAYS dias).
+  --help             Mostra esta ajuda.
+
+Variáveis importantes (edite no script):
+  S3_BUCKET         Nome do bucket S3 (ex: meu-backup)
+  S3_PREFIX         Pasta dentro do bucket (ex: mysql-backups/)
+  RETENTION_DAYS    Dias para manter backups no S3 (padrão: 30)
+
+Fluxo típico:
+  1. ./backup_mysql_s3.sh --create-keys
+  2. ./backup_mysql_s3.sh --configure-aws
+  3. ./backup_mysql_s3.sh --set-lifecycle   (opcional, uma única vez)
+  4. ./backup_mysql_s3.sh --backup          (diariamente)
+  5. ./backup_mysql_s3.sh --restore         (quando necessário)
+EOF
+}
+
+# ==========================================
+# Lógica principal
+# ==========================================
+case "$1" in
+    --backup)           do_backup ;;
+    --restore)          do_restore ;;
+    --create-keys)      create_keys ;;
+    --configure-aws)    configure_aws ;;
+    --set-lifecycle)    set_lifecycle ;;
+    --help|*)           show_help ;;
+esac
+🚀 Como usar
+1. Instale a AWS CLI
+bash
+sudo apt update
+sudo apt install awscli
+2. Torne o script executável
+bash
+chmod +x backup_mysql_s3.sh
+3. Crie as chaves RSA
+bash
+./backup_mysql_s3.sh --create-keys
+4. Configure a AWS CLI
+bash
+./backup_mysql_s3.sh --configure-aws
+Serão solicitados:
+
+AWS Access Key ID e Secret Access Key (crie um usuário IAM com permissões para S3)
+
+Região (ex: us-east-1, sa-east-1)
+
+Formato de saída (ex: json)
+
+5. (Opcional) Configure a política de expiração no S3
+Isso faz com que os backups sejam automaticamente deletados após RETENTION_DAYS dias (padrão: 30).
+
+bash
+./backup_mysql_s3.sh --set-lifecycle
+6. Faça um backup
+bash
+./backup_mysql_s3.sh --backup
+O script:
+
+Faz o dump do MySQL (pedirá a senha root)
+
+Criptografa com RSA
+
+Envia para s3://seu-bucket/mysql-backups/
+
+Mantém apenas os 2 backups mais recentes localmente
+
+7. Restaure um backup
+bash
+./backup_mysql_s3.sh --restore
+O script:
+
+Busca o backup mais recente no S3
+
+Baixa, descriptografa e restaura (pedirá a senha root do MySQL)
+
+🧹 Como funciona a limpeza automática (rotação)
+O script oferece duas camadas de limpeza:
+
+Camada	O que faz	Onde
+Lifecycle do S3	Deleta objetos com mais de RETENTION_DAYS dias	No bucket S3 (configurado com --set-lifecycle)
+Limpeza local	Mantém apenas os 2 backups mais recentes	No diretório /backup
+Isso garante que:
+
+Seu bucket S3 não acumule backups eternos (controle de custos)
+
+Seu disco local não fique lotado
+
+🔧 Personalização
+Edite as variáveis no início do script:
+
+bash
+S3_BUCKET="seu-bucket-backup"      # Nome do bucket
+S3_PREFIX="mysql-backups/"         # Pasta no bucket
+RETENTION_DAYS=30                  # Dias de retenção no S3
+BACKUP_DIR="/backup"               # Diretório local
+🔐 Permissões IAM necessárias
+O usuário AWS usado precisa das seguintes permissões:
+
+json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:PutBucketLifecycleConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::seu-bucket",
+        "arn:aws:s3:::seu-bucket/*"
+      ]
+    }
+  ]
+}
+📅 Agendamento com Cron
+Para backups automáticos diários:
+
+bash
+crontab -e
+Adicione (ex: 2h da manhã):
+
+text
+0 2 * * * /caminho/para/backup_mysql_s3.sh --backup >> /var/log/backup_mysql.log 2>&1
+Se precisar ajustar algo (como mudar o número de backups locais mantidos, adicionar notificações ou compactação diferente), é só avisar! 🚀
+
+This response is AI-generated, for reference only.
